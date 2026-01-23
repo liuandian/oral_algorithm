@@ -5,17 +5,34 @@ Entry point for the application.
 """
 import uvicorn
 from fastapi import FastAPI
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.config import ensure_directories
 from app.api import upload, user, session, report
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup 逻辑
+    print("=" * 60)
+    print(f"{settings.APP_NAME} v{settings.APP_VERSION}")
+    print("=" * 60)
+    print("System initializing...")
+    ensure_directories()
+    print("System ready!")
+    print(f"API Docs: http://localhost:8000/docs")
+    print("=" * 60)
+    yield
+    # Shutdown 逻辑 (如有需要可以在这里添加)
+    print("System shutting down...")
+
 # Create FastAPI application
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="Oral Health Monitoring System API (V1)",
+    lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -47,26 +64,11 @@ def health_check():
     return {"status": "healthy", "version": settings.APP_VERSION}
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Execute on application startup"""
-    print("=" * 60)
-    print(f"{settings.APP_NAME} v{settings.APP_VERSION}")
-    print("=" * 60)
-    print("System initializing...")
-    
-    # Ensure data directories exist
-    ensure_directories()
-    
-    print("System ready!")
-    print(f"API Docs: http://localhost:8000/docs")
-    print("=" * 60)
-
 
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8765,
         reload=settings.DEBUG
     )
