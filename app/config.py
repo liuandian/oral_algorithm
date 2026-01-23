@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     # ========================================
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432
-    DB_USER: str = "miracleliuan@gmail.com"
-    DB_PASSWORD: str = "123456"
+    DB_USER: str = "postgre"
+    DB_PASSWORD: str = "postgre"
     DB_NAME: str = "oral_health_db"
 
     @property

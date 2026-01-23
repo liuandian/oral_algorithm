@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI):
     print("System initializing...")
     ensure_directories()
     print("System ready!")
-    print(f"API Docs: http://localhost:8000/docs")
+    print(f"API Docs: http://localhost:8765/docs")
     print("=" * 60)
     yield
     # Shutdown 逻辑 (如有需要可以在这里添加)

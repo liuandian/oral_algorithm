@@ -44,10 +44,16 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trigger_b_raw_videos_readonly
-    BEFORE UPDATE ON b_raw_videos
-    FOR EACH ROW
-    EXECUTE FUNCTION prevent_b_stream_update();
+-- 安全地创建触发器（避免重复报错）
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trigger_b_raw_videos_readonly') THEN
+        CREATE TRIGGER trigger_b_raw_videos_readonly
+            BEFORE UPDATE ON b_raw_videos
+            FOR EACH ROW
+            EXECUTE FUNCTION prevent_b_stream_update();
+    END IF;
+END $$;
 
 
 -- ========================================
@@ -76,7 +82,7 @@ CREATE TABLE IF NOT EXISTS a_keyframes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id UUID NOT NULL REFERENCES a_sessions(id) ON DELETE CASCADE,
     frame_index INT NOT NULL,
-    timestamp_in_video VARCHAR(10) NOT NULL,  -- "00:12"
+    timestamp_in_video VARCHAR(10) NOT NULL,  -- "00:12.50"
     extraction_strategy VARCHAR(20) NOT NULL CHECK (extraction_strategy IN ('rule_triggered', 'uniform_sampled')),
 
     -- 图像存储（A流的缓存副本）
@@ -168,15 +174,15 @@ CREATE TABLE IF NOT EXISTS c_annotations (
 
 
 -- ========================================
--- 数据完整性检查函数
+-- 数据完整性检查函数 (修正版)
 -- ========================================
 
 -- 检查基线完成状态
 CREATE OR REPLACE FUNCTION check_baseline_completion()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- 检查是否7个分区都已上传
-    IF jsonb_object_keys(NEW.baseline_zone_map) @> ARRAY['zone_1', 'zone_2', 'zone_3', 'zone_4', 'zone_5', 'zone_6', 'zone_7']::TEXT[] THEN
+    -- 修正逻辑：使用 JSONB 键存在操作符 (?&) 检查是否包含所有分区键
+    IF NEW.baseline_zone_map ?& ARRAY['zone_1', 'zone_2', 'zone_3', 'zone_4', 'zone_5', 'zone_6', 'zone_7'] THEN
         NEW.baseline_completed := TRUE;
         NEW.baseline_completion_date := NOW();
     END IF;
@@ -184,14 +190,12 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trigger_check_baseline
-    BEFORE UPDATE ON a_user_profiles
-    FOR EACH ROW
-    EXECUTE FUNCTION check_baseline_completion();
-
-
--- ========================================
--- 初始化数据（可选）
--- ========================================
--- 插入示例用户（用于测试）
--- INSERT INTO a_user_profiles (user_id) VALUES ('test_user_001');
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trigger_check_baseline') THEN
+        CREATE TRIGGER trigger_check_baseline
+            BEFORE UPDATE ON a_user_profiles
+            FOR EACH ROW
+            EXECUTE FUNCTION check_baseline_completion();
+    END IF;
+END $$;

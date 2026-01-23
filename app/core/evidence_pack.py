@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-EvidencePack 生成器
-将关键帧数据转换为结构化的 EvidencePack
+EvidencePack 生成器 - 修正版
+适配最新的 KeyframeData 模型
 """
-import base64
+import json
 from typing import List
 from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.models.database import ASession, AKeyframe, AEvidencePack
 from app.models.evidence_pack import EvidencePack, KeyframeData, FrameMetaTags
-from app.services.storage import storage_service
 
 
 class EvidencePackError(Exception):
@@ -22,33 +21,11 @@ class EvidencePackGenerator:
     """EvidencePack 生成器"""
 
     def __init__(self, db: Session):
-        """
-        初始化生成器
-
-        Args:
-            db: 数据库会话
-        """
         self.db = db
 
     def generate_evidence_pack(self, session_id: str) -> EvidencePack:
         """
         为指定 Session 生成 EvidencePack
-
-        Args:
-            session_id: Session ID
-
-        Returns:
-            EvidencePack 对象
-
-        Raises:
-            EvidencePackError: 生成过程出错
-
-        流程：
-        1. 查询 Session 和关键帧
-        2. 加载关键帧图像
-        3. 编码为 Base64
-        4. 构建 EvidencePack
-        5. 保存到数据库
         """
         print(f"[EvidencePack] 开始生成: session_id={session_id}")
 
@@ -74,25 +51,35 @@ class EvidencePackGenerator:
         frame_data_list: List[KeyframeData] = []
 
         for kf in keyframes:
-            # 加载图像文件
+            # 确认图像文件存在
             image_path = Path(kf.image_path)
             if not image_path.exists():
                 print(f"[警告] 关键帧图像不存在: {image_path}")
-                continue
-
-            # 读取并编码为 Base64
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
-                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-
+                # 即使文件临时缺失，只要数据库有记录，我们仍生成元数据，但标记警告
+            
             # 构建 FrameMetaTags
-            meta_tags = FrameMetaTags(**kf.meta_tags) if kf.meta_tags else FrameMetaTags()
+            # 数据库中 meta_tags 可能是 dict 或 JSON 字符串，需处理
+            tags_source = kf.meta_tags
+            if isinstance(tags_source, str):
+                try:
+                    tags_dict = json.loads(tags_source)
+                except:
+                    tags_dict = {}
+            elif isinstance(tags_source, dict):
+                tags_dict = tags_source
+            else:
+                tags_dict = {}
+
+            meta_tags = FrameMetaTags(**tags_dict)
 
             # 构建 KeyframeData
+            # 修正：使用 kf.id (UUID) 作为 frame_id
+            # 修正：使用 kf.image_path 作为 image_url (本地路径)
+            # 修正：timestamp 格式现已兼容 00:00.00
             frame_data = KeyframeData(
-                frame_index=kf.frame_index,
+                frame_id=str(kf.id),
                 timestamp=kf.timestamp_in_video,
-                image_base64=image_base64,
+                image_url=str(kf.image_path),
                 extraction_strategy=kf.extraction_strategy,
                 anomaly_score=kf.anomaly_score,
                 meta_tags=meta_tags
@@ -101,45 +88,45 @@ class EvidencePackGenerator:
             frame_data_list.append(frame_data)
 
         if not frame_data_list:
-            raise EvidencePackError("没有有效的关键帧图像数据")
+            raise EvidencePackError("没有有效的关键帧数据")
 
         # 第四步：构建 EvidencePack
         evidence_pack = EvidencePack(
             session_id=str(session.id),
+            user_id=session.user_id,
             session_type=session.session_type,
             zone_id=session.zone_id,
+            created_at=str(session.created_at.isoformat()),
+            total_frames=len(frame_data_list),
             frames=frame_data_list
         )
 
         print(f"[EvidencePack] EvidencePack 构建完成，包含 {len(frame_data_list)} 帧")
 
         # 第五步：保存到数据库
-        db_evidence_pack = AEvidencePack(
-            session_id=session.id,
-            pack_json=evidence_pack.model_dump(),
-            total_frames=len(frame_data_list)
-        )
+        # 检查是否已存在
+        existing_pack = self.db.query(AEvidencePack).filter_by(session_id=session.id).first()
+        if existing_pack:
+            print(f"[EvidencePack] 更新已存在的 EvidencePack: {existing_pack.id}")
+            existing_pack.pack_json = evidence_pack.model_dump()
+            existing_pack.total_frames = len(frame_data_list)
+            self.db.add(existing_pack)
+        else:
+            db_evidence_pack = AEvidencePack(
+                session_id=session.id,
+                pack_json=evidence_pack.model_dump(),
+                total_frames=len(frame_data_list)
+            )
+            self.db.add(db_evidence_pack)
+            print(f"[EvidencePack] 创建新的 EvidencePack")
 
-        self.db.add(db_evidence_pack)
         self.db.commit()
-        self.db.refresh(db_evidence_pack)
-
-        print(f"[EvidencePack] 已保存到数据库: {db_evidence_pack.id}")
 
         return evidence_pack
 
     def get_evidence_pack_by_session(self, session_id: str) -> EvidencePack:
         """
         从数据库获取已生成的 EvidencePack
-
-        Args:
-            session_id: Session ID
-
-        Returns:
-            EvidencePack 对象
-
-        Raises:
-            EvidencePackError: 未找到 EvidencePack
         """
         db_pack = (
             self.db.query(AEvidencePack)
@@ -150,26 +137,17 @@ class EvidencePackGenerator:
         if not db_pack:
             raise EvidencePackError(f"EvidencePack 不存在: {session_id}")
 
-        # 从 JSON 反序列化
         return EvidencePack(**db_pack.pack_json)
 
     def export_evidence_pack_json(self, session_id: str, output_path: str) -> Path:
         """
         导出 EvidencePack 为 JSON 文件
-
-        Args:
-            session_id: Session ID
-            output_path: 输出文件路径
-
-        Returns:
-            输出文件路径
         """
         evidence_pack = self.get_evidence_pack_by_session(session_id)
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 写入 JSON
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(evidence_pack.model_dump_json(indent=2))
 
