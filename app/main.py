@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.config import ensure_directories
-from app.api import upload, user, session, report
+from app.api import upload, user, session, report, profile
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -51,6 +51,7 @@ app.add_middleware(
 # ========================================
 app.include_router(upload.router, prefix=settings.API_PREFIX, tags=["Upload"])
 app.include_router(user.router, prefix=settings.API_PREFIX, tags=["User Profile"])
+app.include_router(profile.router, prefix=settings.API_PREFIX, tags=["User Profile Extended"])
 app.include_router(session.router, prefix=settings.API_PREFIX, tags=["Session & Evidence"])
 app.include_router(report.router, prefix=settings.API_PREFIX, tags=["LLM Report"])
 

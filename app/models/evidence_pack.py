@@ -3,11 +3,51 @@
 EvidencePack 数据模型 - 修正版
 修复时间戳校验并适配生成器
 """
-from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pydantic import BaseModel, Field, field_validator
 
+
+# ========================================
+# 口腔分区枚举
+# ========================================
+
+class OralZone(str, Enum):
+    """口腔6+1分区枚举"""
+    UPPER_LEFT_POSTERIOR = "upper_left_posterior"      # Zone 1: 上左后区
+    UPPER_ANTERIOR = "upper_anterior"                  # Zone 2: 上前区
+    UPPER_RIGHT_POSTERIOR = "upper_right_posterior"    # Zone 3: 上右后区
+    LOWER_LEFT_POSTERIOR = "lower_left_posterior"      # Zone 4: 下左后区
+    LOWER_ANTERIOR = "lower_anterior"                  # Zone 5: 下前区
+    LOWER_RIGHT_POSTERIOR = "lower_right_posterior"    # Zone 6: 下右后区
+    OPTIONAL_MOLAR_SPECIAL = "optional_molar_special"  # Zone 7: 可选-最后磨牙远端/舌侧
+
+
+# Zone ID 映射常量
+ZONE_ID_MAP: Dict[int, OralZone] = {
+    1: OralZone.UPPER_LEFT_POSTERIOR,
+    2: OralZone.UPPER_ANTERIOR,
+    3: OralZone.UPPER_RIGHT_POSTERIOR,
+    4: OralZone.LOWER_LEFT_POSTERIOR,
+    5: OralZone.LOWER_ANTERIOR,
+    6: OralZone.LOWER_RIGHT_POSTERIOR,
+    7: OralZone.OPTIONAL_MOLAR_SPECIAL,
+}
+
+ZONE_DISPLAY_NAMES: Dict[int, str] = {
+    1: "上左后区",
+    2: "上前区",
+    3: "上右后区",
+    4: "下左后区",
+    5: "下前区",
+    6: "下右后区",
+    7: "可选-最后磨牙特殊区",
+}
+
+
+# ========================================
+# 牙齿与区域枚举
+# ========================================
 
 class ToothSide(str, Enum):
     """牙齿位置：上/下/左/右"""
@@ -27,20 +67,22 @@ class ToothType(str, Enum):
 
 class Region(str, Enum):
     """口腔区域"""
-    OCCLUSAL = "occlusal"  # 咬合面
-    GUM = "gum"  # 牙龈
-    LINGUAL = "lingual"  # 舌侧
-    BUCCAL = "buccal"  # 颊侧
+    OCCLUSAL = "occlusal"        # 咬合面
+    INTERPROXIMAL = "interproximal"  # 牙缝/邻面
+    GUM = "gum"                  # 龈缘
+    LINGUAL = "lingual"          # 舌侧
+    BUCCAL = "buccal"            # 颊侧
     UNKNOWN = "unknown"
 
 
 class DetectedIssue(str, Enum):
     """检测到的问题类型"""
-    DARK_DEPOSIT = "dark_deposit"  # 黑色槽沟/沉积物
-    YELLOW_PLAQUE = "yellow_plaque"  # 黄色牙菌斑/牙石
-    STRUCTURAL_DEFECT = "structural_defect"  # 结构缺损（龋齿、缺损）
-    GUM_ISSUE = "gum_issue"  # 牙龈问题（红肿、出血）
-    NONE = "none"  # 未检测到问题
+    DARK_DEPOSIT = "dark_deposit"           # 黑色槽沟/沉积物
+    YELLOW_PLAQUE = "yellow_plaque"         # 黄色牙菌斑/牙石
+    STRUCTURAL_DEFECT = "structural_defect" # 结构缺损（龋齿、缺损）
+    GUM_ISSUE = "gum_issue"                 # 牙龈问题（红肿、出血）
+    NONE = "none"                           # 未检测到问题
+    UNKNOWN = "unknown"                     # 未知/无法判断
 
 
 class FrameMetaTags(BaseModel):
@@ -49,6 +91,8 @@ class FrameMetaTags(BaseModel):
     tooth_type: ToothType = ToothType.UNKNOWN
     region: Region = Region.UNKNOWN
     detected_issues: List[DetectedIssue] = Field(default_factory=list)
+    confidence_score: float = Field(default=0.0, ge=0.0, le=1.0, description="分类置信度")
+    is_verified: bool = Field(default=False, description="是否人工校验过")
 
     class Config:
         json_schema_extra = {
@@ -56,7 +100,9 @@ class FrameMetaTags(BaseModel):
                 "side": "upper",
                 "tooth_type": "posterior",
                 "region": "occlusal",
-                "detected_issues": ["dark_deposit", "yellow_plaque"]
+                "detected_issues": ["dark_deposit", "yellow_plaque"],
+                "confidence_score": 0.85,
+                "is_verified": False
             }
         }
 
@@ -70,6 +116,8 @@ class KeyframeData(BaseModel):
     image_url: str = Field(..., description="图像访问路径（A流）")
     anomaly_score: float = Field(default=0.0, ge=0.0, le=1.0, description="异常检测得分（0-1）")
     extraction_strategy: str = Field(default="uniform_sampled", description="抽帧策略：rule_triggered / uniform_sampled")
+    extraction_reason: str = Field(default="", description="选中理由")
+    matched_baseline_frame_id: Optional[str] = Field(None, description="匹配的基线帧ID（Quick Check时使用）")
 
     @field_validator("timestamp")
     @classmethod
@@ -103,10 +151,61 @@ class KeyframeData(BaseModel):
                 },
                 "image_url": "/data/a_stream/session_123/frame_001.jpg",
                 "anomaly_score": 0.85,
-                "extraction_strategy": "rule_triggered"
+                "extraction_strategy": "rule_triggered",
+                "extraction_reason": "some_problem"
             }
         }
 
+
+# ========================================
+# 基线参考模型
+# ========================================
+
+class BaselineFrameReference(BaseModel):
+    """基线参考帧"""
+    baseline_frame_id: str = Field(..., description="基线帧ID")
+    baseline_session_id: str = Field(..., description="基线Session ID")
+    baseline_zone_id: int = Field(..., ge=1, le=7, description="基线分区ID")
+    baseline_timestamp: str = Field(..., description="基线帧时间戳")
+    baseline_image_url: str = Field(..., description="基线帧图像URL")
+    baseline_created_at: str = Field(..., description="基线创建时间")
+    matching_score: float = Field(default=0.0, ge=0.0, le=1.0, description="匹配得分")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "baseline_frame_id": "550e8400-e29b-41d4-a716-446655440001",
+                "baseline_session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567891",
+                "baseline_zone_id": 2,
+                "baseline_timestamp": "00:05.20",
+                "baseline_image_url": "/data/a_stream/baseline_session/frame_001.jpg",
+                "baseline_created_at": "2025-01-15T10:30:00Z",
+                "matching_score": 0.92
+            }
+        }
+
+
+class BaselineReference(BaseModel):
+    """基线参考数据包"""
+    has_baseline: bool = Field(default=False, description="是否有基线数据")
+    baseline_completion_date: Optional[str] = Field(None, description="基线完成日期")
+    matched_baseline_frames: List[BaselineFrameReference] = Field(default_factory=list, description="匹配的基线帧列表")
+    comparison_mode: str = Field(default="none", description="对比模式：none/partial/full")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "has_baseline": True,
+                "baseline_completion_date": "2025-01-15T10:30:00Z",
+                "matched_baseline_frames": [],
+                "comparison_mode": "full"
+            }
+        }
+
+
+# ========================================
+# 证据包主模型
+# ========================================
 
 class EvidencePack(BaseModel):
     """口腔健康分析证据包（供 LLM 消费）"""
@@ -117,6 +216,7 @@ class EvidencePack(BaseModel):
     created_at: str = Field(..., description="创建时间（ISO 8601格式）")
     total_frames: int = Field(..., ge=1, le=25, description="关键帧总数（1-25）")
     frames: List[KeyframeData] = Field(..., max_length=25, description="关键帧数据列表（最多25帧）")
+    baseline_reference: Optional[BaselineReference] = Field(None, description="基线参考数据（Quick Check时使用）")
 
     @field_validator("frames")
     @classmethod

@@ -4,6 +4,8 @@
 封装千问多模态 API 调用
 """
 import json
+import base64
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 import requests
 
@@ -17,6 +19,9 @@ class QianwenAPIError(Exception):
 
 class QianwenVisionClient:
     """千问 Vision API 客户端"""
+
+    # 限制发送的图像数量（避免请求过大超时）
+    MAX_IMAGES_PER_REQUEST = 8
 
     def __init__(self, api_key: str, model: str = "qwen-vl-max"):
         """
@@ -73,11 +78,12 @@ class QianwenVisionClient:
         }
 
         try:
+            # 增加超时时间：连接超时 30s，读取超时 180s
             response = requests.post(
                 self.api_url,
                 headers=headers,
                 json=payload,
-                timeout=60
+                timeout=(30, 180)
             )
 
             response.raise_for_status()
@@ -111,29 +117,107 @@ class QianwenVisionClient:
             "text": prompt
         })
 
-        # 后续项：关键帧图像（最多25帧）
-        for idx, frame in enumerate(evidence_pack.frames[:25]):
-            # 添加图像
-            content.append({
-                "image": f"data:image/jpeg;base64,{frame.image_base64}"
-            })
+        # 选择最有代表性的帧（优先选择异常分数高的帧）
+        frames_to_send = self._select_representative_frames(evidence_pack.frames)
+        print(f"[千问] 选择 {len(frames_to_send)} 帧发送 (共 {len(evidence_pack.frames)} 帧)")
+
+        # 后续项：关键帧图像
+        for idx, frame in enumerate(frames_to_send):
+            # 从文件路径读取图像并转换为 base64
+            image_base64 = self._load_image_as_base64(frame.image_url)
+
+            if image_base64:
+                # 添加图像
+                content.append({
+                    "image": f"data:image/jpeg;base64,{image_base64}"
+                })
 
             # 添加帧元信息文本
             frame_info = (
                 f"\n[帧 {idx + 1}] "
-                f"时间戳: {frame.timestamp:.2f}s, "
+                f"时间戳: {frame.timestamp}, "
                 f"异常分数: {frame.anomaly_score:.3f}, "
                 f"策略: {frame.extraction_strategy}"
             )
 
             if frame.meta_tags:
                 frame_info += f", 区域: {frame.meta_tags.region.value}"
+                if frame.meta_tags.side.value != "unknown":
+                    frame_info += f", 位置: {frame.meta_tags.side.value}"
+                if frame.meta_tags.tooth_type.value != "unknown":
+                    frame_info += f", 牙型: {frame.meta_tags.tooth_type.value}"
 
             content.append({
                 "text": frame_info
             })
 
         return content
+
+    def _select_representative_frames(self, frames: List[KeyframeData]) -> List[KeyframeData]:
+        """
+        选择最有代表性的帧发送给 API
+
+        策略：
+        1. 优先选择异常分数高的帧（rule_triggered）
+        2. 均匀采样补充到最大数量
+
+        Args:
+            frames: 所有关键帧列表
+
+        Returns:
+            选中的帧列表
+        """
+        if len(frames) <= self.MAX_IMAGES_PER_REQUEST:
+            return frames
+
+        # 分离 rule_triggered 和 uniform_sampled 帧
+        rule_triggered = [f for f in frames if f.extraction_strategy == "rule_triggered"]
+        uniform_sampled = [f for f in frames if f.extraction_strategy == "uniform_sampled"]
+
+        selected = []
+
+        # 优先添加 rule_triggered 帧（按异常分数排序）
+        rule_triggered.sort(key=lambda x: x.anomaly_score, reverse=True)
+        selected.extend(rule_triggered[:self.MAX_IMAGES_PER_REQUEST])
+
+        # 如果还有空间，均匀采样补充
+        remaining_slots = self.MAX_IMAGES_PER_REQUEST - len(selected)
+        if remaining_slots > 0 and uniform_sampled:
+            # 均匀采样
+            step = max(1, len(uniform_sampled) // remaining_slots)
+            for i in range(0, len(uniform_sampled), step):
+                if len(selected) >= self.MAX_IMAGES_PER_REQUEST:
+                    break
+                selected.append(uniform_sampled[i])
+
+        # 按原始顺序排序（根据时间戳）
+        selected.sort(key=lambda x: x.timestamp)
+
+        return selected
+
+    def _load_image_as_base64(self, image_path: str) -> Optional[str]:
+        """
+        从文件路径加载图像并转换为 base64
+
+        Args:
+            image_path: 图像文件路径
+
+        Returns:
+            Base64 编码的图像字符串，失败返回 None
+        """
+        try:
+            path = Path(image_path)
+            if not path.exists():
+                print(f"[警告] 图像文件不存在: {image_path}")
+                return None
+
+            with open(path, "rb") as f:
+                image_data = f.read()
+                return base64.b64encode(image_data).decode("utf-8")
+
+        except Exception as e:
+            print(f"[警告] 读取图像失败 {image_path}: {e}")
+            return None
 
     def _extract_response_text(self, response_data: Dict[str, Any]) -> str:
         """

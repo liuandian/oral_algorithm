@@ -125,12 +125,17 @@ class AEvidencePack(Base):
     total_frames = Column(Integer, nullable=False)
     created_at = Column(TIMESTAMP, default=func.now())
 
+    # 新增：基线参考数据
+    baseline_reference_json = Column(JSONB, nullable=True)
+    comparison_mode = Column(String(20), default="none")
+
     # 关系
     session = relationship("ASession", back_populates="evidence_pack")
     reports = relationship("AReport", back_populates="evidence_pack", cascade="all, delete-orphan")
 
     __table_args__ = (
         CheckConstraint("total_frames > 0 AND total_frames <= 25", name="check_total_frames"),
+        CheckConstraint("comparison_mode IN ('none', 'partial', 'full')", name="check_comparison_mode"),
     )
 
 
@@ -149,8 +154,73 @@ class AUserProfile(Base):
     total_quick_checks = Column(Integer, default=0)
     last_check_date = Column(TIMESTAMP)
 
+    # 新增：基线更新统计
+    total_baseline_updates = Column(Integer, default=0)
+    last_baseline_update_date = Column(TIMESTAMP)
+
+    # 新增：时间轴缓存与通知设置
+    timeline_summary = Column(JSONB, default={})
+    notification_preferences = Column(JSONB, default={})
+
     created_at = Column(TIMESTAMP, default=func.now())
     updated_at = Column(TIMESTAMP, default=func.now(), onupdate=func.now())
+
+    # 关系
+    events = relationship("AUserEvent", back_populates="profile")
+    concerns = relationship("AConcernPoint", back_populates="profile")
+
+
+class AUserEvent(Base):
+    """A流：用户自述事件表"""
+    __tablename__ = "a_user_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(String(64), ForeignKey("a_user_profiles.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type = Column(String(50), nullable=False)  # dental_cleaning/scaling/filling/extraction/...
+    event_description = Column(Text)
+    event_date = Column(TIMESTAMP, nullable=False)
+    related_session_id = Column(UUID(as_uuid=True), ForeignKey("a_sessions.id", ondelete="SET NULL"), nullable=True)
+    event_metadata = Column(JSONB, default={})  # renamed from 'metadata' (reserved)
+    created_at = Column(TIMESTAMP, default=func.now())
+
+    # 关系
+    profile = relationship("AUserProfile", back_populates="events")
+
+    __table_args__ = (
+        CheckConstraint("event_type IN ('dental_cleaning', 'scaling', 'filling', 'extraction', 'crown', 'orthodontic', 'whitening', 'checkup', 'other')", name="check_event_type"),
+    )
+
+
+class AConcernPoint(Base):
+    """A流：历史关注点表"""
+    __tablename__ = "a_concern_points"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(String(64), ForeignKey("a_user_profiles.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    source_type = Column(String(20), nullable=False)  # user_reported/system_detected
+    zone_id = Column(Integer, nullable=True)
+    location_description = Column(String(200))
+    concern_type = Column(String(50), nullable=False)
+    concern_description = Column(Text)
+    severity = Column(String(20), default="mild")  # mild/moderate/severe
+    status = Column(String(20), default="active", index=True)  # active/resolved/monitoring
+    first_detected_at = Column(TIMESTAMP, default=func.now())
+    last_observed_at = Column(TIMESTAMP, default=func.now())
+    resolved_at = Column(TIMESTAMP, nullable=True)
+    related_sessions = Column(JSONB, default=[])  # List of session IDs
+    evidence_frame_ids = Column(JSONB, default=[])  # List of frame IDs
+    created_at = Column(TIMESTAMP, default=func.now())
+    updated_at = Column(TIMESTAMP, default=func.now(), onupdate=func.now())
+
+    # 关系
+    profile = relationship("AUserProfile", back_populates="concerns")
+
+    __table_args__ = (
+        CheckConstraint("source_type IN ('user_reported', 'system_detected')", name="check_concern_source_type"),
+        CheckConstraint("severity IN ('mild', 'moderate', 'severe')", name="check_concern_severity"),
+        CheckConstraint("status IN ('active', 'resolved', 'monitoring')", name="check_concern_status"),
+        CheckConstraint("zone_id IS NULL OR (zone_id BETWEEN 1 AND 7)", name="check_concern_zone_id"),
+    )
 
 
 class AReport(Base):

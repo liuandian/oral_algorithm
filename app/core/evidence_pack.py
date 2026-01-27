@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 EvidencePack 生成器 - 修正版
-适配最新的 KeyframeData 模型
+适配最新的 KeyframeData 模型，支持基线匹配
 """
 import json
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.models.database import ASession, AKeyframe, AEvidencePack
-from app.models.evidence_pack import EvidencePack, KeyframeData, FrameMetaTags
+from app.models.evidence_pack import EvidencePack, KeyframeData, FrameMetaTags, BaselineReference
+from app.core.frame_matcher import FrameMatcherService
 
 
 class EvidencePackError(Exception):
@@ -22,6 +23,7 @@ class EvidencePackGenerator:
 
     def __init__(self, db: Session):
         self.db = db
+        self.frame_matcher = FrameMatcherService(db)
 
     def generate_evidence_pack(self, session_id: str) -> EvidencePack:
         """
@@ -81,6 +83,7 @@ class EvidencePackGenerator:
                 timestamp=kf.timestamp_in_video,
                 image_url=str(kf.image_path),
                 extraction_strategy=kf.extraction_strategy,
+                extraction_reason=kf.extraction_reason,
                 anomaly_score=kf.anomaly_score,
                 meta_tags=meta_tags
             )
@@ -90,7 +93,20 @@ class EvidencePackGenerator:
         if not frame_data_list:
             raise EvidencePackError("没有有效的关键帧数据")
 
-        # 第四步：构建 EvidencePack
+        # 第四步：如果是 Quick Check，构建基线参考
+        baseline_reference: Optional[BaselineReference] = None
+        comparison_mode = "none"
+
+        if session.session_type == "quick_check":
+            baseline_reference = self._build_baseline_reference(
+                user_id=session.user_id,
+                quick_check_keyframes=keyframes,
+                frame_data_list=frame_data_list
+            )
+            comparison_mode = baseline_reference.comparison_mode if baseline_reference else "none"
+            print(f"[EvidencePack] 基线匹配完成: comparison_mode={comparison_mode}")
+
+        # 第五步：构建 EvidencePack
         evidence_pack = EvidencePack(
             session_id=str(session.id),
             user_id=session.user_id,
@@ -98,24 +114,31 @@ class EvidencePackGenerator:
             zone_id=session.zone_id,
             created_at=str(session.created_at.isoformat()),
             total_frames=len(frame_data_list),
-            frames=frame_data_list
+            frames=frame_data_list,
+            baseline_reference=baseline_reference
         )
 
         print(f"[EvidencePack] EvidencePack 构建完成，包含 {len(frame_data_list)} 帧")
 
-        # 第五步：保存到数据库
+        # 第六步：保存到数据库
         # 检查是否已存在
         existing_pack = self.db.query(AEvidencePack).filter_by(session_id=session.id).first()
+        baseline_ref_json = baseline_reference.model_dump() if baseline_reference else None
+
         if existing_pack:
             print(f"[EvidencePack] 更新已存在的 EvidencePack: {existing_pack.id}")
             existing_pack.pack_json = evidence_pack.model_dump()
             existing_pack.total_frames = len(frame_data_list)
+            existing_pack.baseline_reference_json = baseline_ref_json
+            existing_pack.comparison_mode = comparison_mode
             self.db.add(existing_pack)
         else:
             db_evidence_pack = AEvidencePack(
                 session_id=session.id,
                 pack_json=evidence_pack.model_dump(),
-                total_frames=len(frame_data_list)
+                total_frames=len(frame_data_list),
+                baseline_reference_json=baseline_ref_json,
+                comparison_mode=comparison_mode
             )
             self.db.add(db_evidence_pack)
             print(f"[EvidencePack] 创建新的 EvidencePack")
@@ -153,3 +176,41 @@ class EvidencePackGenerator:
 
         print(f"[EvidencePack] 已导出 JSON: {output_path}")
         return output_path
+
+    def _build_baseline_reference(
+        self,
+        user_id: str,
+        quick_check_keyframes: List[AKeyframe],
+        frame_data_list: List[KeyframeData]
+    ) -> Optional[BaselineReference]:
+        """
+        构建基线参考数据
+
+        Args:
+            user_id: 用户ID
+            quick_check_keyframes: Quick Check 关键帧（数据库对象）
+            frame_data_list: 帧数据列表（Pydantic对象）
+
+        Returns:
+            BaselineReference 对象
+        """
+        # 使用 FrameMatcherService 进行匹配
+        baseline_ref = self.frame_matcher.build_baseline_reference(
+            user_id=user_id,
+            quick_check_frames=quick_check_keyframes
+        )
+
+        # 更新 frame_data_list 中的 matched_baseline_frame_id
+        if baseline_ref.has_baseline and baseline_ref.matched_baseline_frames:
+            # 通过 FrameMatcherService 获取详细匹配
+            matches = self.frame_matcher.match_frames_to_baseline(
+                quick_check_frames=quick_check_keyframes,
+                user_id=user_id
+            )
+
+            # 更新每个帧的 matched_baseline_frame_id
+            for frame_data in frame_data_list:
+                if frame_data.frame_id in matches:
+                    frame_data.matched_baseline_frame_id = matches[frame_data.frame_id].baseline_frame_id
+
+        return baseline_ref
