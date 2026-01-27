@@ -58,7 +58,6 @@ async def upload_quick_check(
         ingestion.update_session_status(session_id, "completed")
         
         # 5. 更新用户档案
-        # (这里之前报错，现在数据库已修复)
         profile_mgr = ProfileManager(db)
         profile_mgr.record_quick_check(user_id)
 

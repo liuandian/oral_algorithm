@@ -91,7 +91,8 @@ class AKeyframe(Base):
     frame_index = Column(Integer, nullable=False)
     timestamp_in_video = Column(String(10), nullable=False)
     extraction_strategy = Column(String(20), nullable=False)
-
+    extraction_reason = Column(String(50), nullable=True)
+    
     # 图像存储
     image_path = Column(Text, nullable=False)
     image_thumbnail_path = Column(Text)

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-视频摄取管道 - 修正版
+视频摄取管道
 """
 from pathlib import Path
 from typing import Tuple, Optional
