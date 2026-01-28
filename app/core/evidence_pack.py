@@ -93,18 +93,18 @@ class EvidencePackGenerator:
         if not frame_data_list:
             raise EvidencePackError("没有有效的关键帧数据")
 
-        # 第四步：如果是 Quick Check，构建基线参考
+        # 第四步：如果是 Quick Check，构建基线参考（使用简化方法：每区域取中间帧）
         baseline_reference: Optional[BaselineReference] = None
         comparison_mode = "none"
 
         if session.session_type == "quick_check":
-            baseline_reference = self._build_baseline_reference(
-                user_id=session.user_id,
-                quick_check_keyframes=keyframes,
-                frame_data_list=frame_data_list
+            # 使用简化方法：每个区域选择中间帧作为基线
+            baseline_reference, middle_frames = self.frame_matcher.build_baseline_reference_simple(
+                user_id=session.user_id
             )
             comparison_mode = baseline_reference.comparison_mode if baseline_reference else "none"
-            print(f"[EvidencePack] 基线匹配完成: comparison_mode={comparison_mode}")
+            print(f"[EvidencePack] 基线参考构建完成: comparison_mode={comparison_mode}, "
+                  f"覆盖 {len(middle_frames) if middle_frames else 0}/7 区域")
 
         # 第五步：构建 EvidencePack
         evidence_pack = EvidencePack(

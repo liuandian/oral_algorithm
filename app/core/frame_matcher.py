@@ -4,6 +4,7 @@
 基于结构化标签匹配 Quick Check 帧与基线帧
 """
 from typing import List, Dict, Optional, Tuple
+import json
 from sqlalchemy.orm import Session
 
 from app.models.database import AKeyframe, ASession, AUserProfile
@@ -301,3 +302,100 @@ class FrameMatcherService:
             分区显示名称
         """
         return ZONE_DISPLAY_NAMES.get(zone_id, f"未知分区 {zone_id}")
+
+    def get_zone_middle_frames(self, user_id: str) -> Dict[int, AKeyframe]:
+        """
+        获取用户每个基线区域的中间帧
+
+        策略：每个区域选择帧列表中间位置的帧作为代表
+
+        Args:
+            user_id: 用户ID
+
+        Returns:
+            按 zone_id 映射的中间帧 {zone_id: AKeyframe}
+        """
+        print(f"[FrameMatcher] 获取用户基线中间帧: user_id={user_id}")
+
+        # 获取所有区域的帧
+        frames_by_zone = self._get_user_baseline_frames(user_id)
+
+        if not frames_by_zone:
+            print(f"[FrameMatcher] 用户没有基线帧数据")
+            return {}
+
+        middle_frames: Dict[int, AKeyframe] = {}
+
+        for zone_id in range(1, 8):  # 1-7 区域
+            if zone_id not in frames_by_zone or not frames_by_zone[zone_id]:
+                continue
+
+            zone_frames = frames_by_zone[zone_id]
+            # 选择中间帧
+            middle_idx = len(zone_frames) // 2
+            middle_frames[zone_id] = zone_frames[middle_idx]
+
+            print(f"[FrameMatcher] 区域 {zone_id} ({self.get_zone_display_name(zone_id)}): "
+                  f"共 {len(zone_frames)} 帧, 选择第 {middle_idx + 1} 帧")
+
+        print(f"[FrameMatcher] 获取到 {len(middle_frames)}/7 个区域的中间帧")
+        return middle_frames
+
+    def build_baseline_reference_simple(self, user_id: str) -> Tuple[BaselineReference, Dict[int, AKeyframe]]:
+        """
+        构建简化版基线参考（每区域取中间帧）
+
+        Args:
+            user_id: 用户ID
+
+        Returns:
+            (BaselineReference, 中间帧字典)
+        """
+        # 获取用户档案
+        profile = self.db.query(AUserProfile).filter_by(user_id=user_id).first()
+
+        if not profile or not profile.baseline_completed:
+            return BaselineReference(
+                has_baseline=False,
+                comparison_mode="none"
+            ), {}
+
+        # 获取每个区域的中间帧
+        middle_frames = self.get_zone_middle_frames(user_id)
+
+        if not middle_frames:
+            return BaselineReference(
+                has_baseline=True,
+                baseline_completion_date=str(profile.baseline_completion_date.isoformat()) if profile.baseline_completion_date else None,
+                comparison_mode="none"
+            ), {}
+
+        # 构建基线帧引用列表
+        baseline_frame_refs = []
+        for zone_id, frame in middle_frames.items():
+            bl_session = self.db.query(ASession).filter_by(id=frame.session_id).first()
+            ref = BaselineFrameReference(
+                baseline_frame_id=str(frame.id),
+                baseline_session_id=str(frame.session_id),
+                baseline_zone_id=zone_id,
+                baseline_timestamp=frame.timestamp_in_video,
+                baseline_image_url=frame.image_path,
+                baseline_created_at=str(bl_session.created_at.isoformat()) if bl_session else "",
+                matching_score=1.0  # 直接选取，无需匹配分数
+            )
+            baseline_frame_refs.append(ref)
+
+        # 确定对比模式
+        if len(middle_frames) >= 6:
+            comparison_mode = "full"
+        elif len(middle_frames) >= 3:
+            comparison_mode = "partial"
+        else:
+            comparison_mode = "minimal"
+
+        return BaselineReference(
+            has_baseline=True,
+            baseline_completion_date=str(profile.baseline_completion_date.isoformat()) if profile.baseline_completion_date else None,
+            matched_baseline_frames=baseline_frame_refs,
+            comparison_mode=comparison_mode
+        ), middle_frames
