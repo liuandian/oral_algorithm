@@ -1,15 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-EvidencePack 生成器 - 修正版
-适配最新的 KeyframeData 模型，支持基线匹配
+EvidencePack 生成器 - 增强版
+适配最新的 KeyframeData 模型，支持基线匹配、用户事件和关注点
 """
 import json
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pathlib import Path
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
-from app.models.database import ASession, AKeyframe, AEvidencePack
-from app.models.evidence_pack import EvidencePack, KeyframeData, FrameMetaTags, BaselineReference
+from app.models.database import (
+    ASession, AKeyframe, AEvidencePack, 
+    AUserEvent, AConcernPoint, AUserProfile
+)
+from app.models.evidence_pack import (
+    EvidencePack, KeyframeData, FrameMetaTags, BaselineReference,
+    UserEventData, ConcernPointData, UserHistorySummary,
+    ZONE_DISPLAY_NAMES
+)
 from app.core.frame_matcher import FrameMatcherService
 
 
@@ -20,6 +28,19 @@ class EvidencePackError(Exception):
 
 class EvidencePackGenerator:
     """EvidencePack 生成器"""
+
+    # 事件类型显示名称映射
+    EVENT_TYPE_DISPLAY_MAP: Dict[str, str] = {
+        "dental_cleaning": "洁牙",
+        "scaling": "洗牙/龈下刮治",
+        "filling": "补牙",
+        "extraction": "拔牙",
+        "crown": "牙冠/烤瓷牙",
+        "orthodontic": "正畸调整",
+        "whitening": "美白",
+        "checkup": "口腔检查",
+        "other": "其他"
+    }
 
     def __init__(self, db: Session):
         self.db = db
@@ -106,7 +127,12 @@ class EvidencePackGenerator:
             print(f"[EvidencePack] 基线参考构建完成: comparison_mode={comparison_mode}, "
                   f"覆盖 {len(middle_frames) if middle_frames else 0}/7 区域")
 
-        # 第五步：构建 EvidencePack
+        # 第五步：构建用户历史摘要（事件和关注点）
+        user_history = self._build_user_history(session.user_id, session_id)
+        print(f"[EvidencePack] 用户历史摘要: {user_history.total_events} 个事件, "
+              f"{len(user_history.active_concerns)} 个活跃关注点")
+
+        # 第六步：构建 EvidencePack
         evidence_pack = EvidencePack(
             session_id=str(session.id),
             user_id=session.user_id,
@@ -115,7 +141,8 @@ class EvidencePackGenerator:
             created_at=str(session.created_at.isoformat()),
             total_frames=len(frame_data_list),
             frames=frame_data_list,
-            baseline_reference=baseline_reference
+            baseline_reference=baseline_reference,
+            user_history=user_history
         )
 
         print(f"[EvidencePack] EvidencePack 构建完成，包含 {len(frame_data_list)} 帧")
@@ -176,6 +203,128 @@ class EvidencePackGenerator:
 
         print(f"[EvidencePack] 已导出 JSON: {output_path}")
         return output_path
+
+    def _build_user_history(self, user_id: str, current_session_id: str) -> UserHistorySummary:
+        """
+        构建用户历史摘要（事件和关注点）
+        
+        Args:
+            user_id: 用户ID
+            current_session_id: 当前Session ID（用于计算距上次检查天数）
+            
+        Returns:
+            UserHistorySummary 对象
+        """
+        now = datetime.now()
+        year_ago = now - timedelta(days=360)
+        
+        # 1. 查询近期事件（最近12个月）
+        recent_events = (
+            self.db.query(AUserEvent)
+            .filter_by(user_id=user_id)
+            .filter(AUserEvent.event_date >= year_ago)
+            .order_by(AUserEvent.event_date.desc())
+            .all()
+        )
+        
+        # 2. 查询所有关注点
+        all_concerns = (
+            self.db.query(AConcernPoint)
+            .filter_by(user_id=user_id)
+            .all()
+        )
+        
+        # 3. 构建事件数据列表
+        event_data_list: List[UserEventData] = []
+        for event in recent_events:
+            event_date = event.event_date
+            if isinstance(event_date, str):
+                event_date = datetime.fromisoformat(event_date.replace('Z', '+00:00'))
+            
+            days_since = (now - event_date).days
+            
+            event_data = UserEventData(
+                event_id=str(event.id),
+                event_type=event.event_type,
+                event_type_display=self.EVENT_TYPE_DISPLAY_MAP.get(event.event_type, event.event_type),
+                event_date=event_date.isoformat(),
+                event_description=event.event_description,
+                related_session_id=str(event.related_session_id) if event.related_session_id else None,
+                metadata=event.event_metadata or {},
+                days_since_event=days_since
+            )
+            event_data_list.append(event_data)
+        
+        # 4. 构建关注点数据列表（只包含活跃的）
+        active_concerns: List[ConcernPointData] = []
+        resolved_count = 0
+        monitoring_count = 0
+        
+        for concern in all_concerns:
+            # 统计各状态数量
+            if concern.status == "resolved":
+                resolved_count += 1
+            elif concern.status == "monitoring":
+                monitoring_count += 1
+            
+            # 只将活跃和监控中的关注点加入列表
+            if concern.status in ["active", "monitoring"]:
+                first_detected = concern.first_detected_at
+                if isinstance(first_detected, str):
+                    first_detected = datetime.fromisoformat(first_detected.replace('Z', '+00:00'))
+                
+                days_since_first = (now - first_detected).days
+                
+                concern_data = ConcernPointData(
+                    concern_id=str(concern.id),
+                    source_type=concern.source_type,
+                    zone_id=concern.zone_id,
+                    zone_display_name=ZONE_DISPLAY_NAMES.get(concern.zone_id) if concern.zone_id else None,
+                    location_description=concern.location_description,
+                    concern_type=concern.concern_type,
+                    concern_description=concern.concern_description,
+                    severity=concern.severity,
+                    status=concern.status,
+                    first_detected_at=first_detected.isoformat(),
+                    last_observed_at=concern.last_observed_at.isoformat() if concern.last_observed_at else first_detected.isoformat(),
+                    days_since_first=days_since_first,
+                    related_sessions_count=len(concern.related_sessions) if concern.related_sessions else 0
+                )
+                active_concerns.append(concern_data)
+        
+        # 5. 计算距上次检查天数
+        days_since_last_check = None
+        last_session = (
+            self.db.query(ASession)
+            .filter_by(user_id=user_id)
+            .filter(ASession.id != current_session_id)
+            .filter(ASession.processing_status == "completed")
+            .order_by(ASession.created_at.desc())
+            .first()
+        )
+        if last_session and last_session.created_at:
+            last_check = last_session.created_at
+            if isinstance(last_check, str):
+                last_check = datetime.fromisoformat(last_check.replace('Z', '+00:00'))
+            days_since_last_check = (now - last_check).days
+        
+        # 6. 计算距上次事件天数
+        days_since_last_event = None
+        if recent_events and recent_events[0].event_date:
+            last_event_date = recent_events[0].event_date
+            if isinstance(last_event_date, str):
+                last_event_date = datetime.fromisoformat(last_event_date.replace('Z', '+00:00'))
+            days_since_last_event = (now - last_event_date).days
+        
+        return UserHistorySummary(
+            total_events=len(recent_events),
+            recent_events=event_data_list,
+            active_concerns=active_concerns,
+            resolved_concerns_count=resolved_count,
+            monitoring_concerns_count=monitoring_count,
+            days_since_last_check=days_since_last_check,
+            days_since_last_event=days_since_last_event
+        )
 
     def _build_baseline_reference(
         self,

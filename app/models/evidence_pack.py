@@ -204,6 +204,89 @@ class BaselineReference(BaseModel):
 
 
 # ========================================
+# 用户历史相关模型
+# ========================================
+
+class UserEventData(BaseModel):
+    """用户事件数据（用于EvidencePack）"""
+    event_id: str = Field(..., description="事件ID")
+    event_type: str = Field(..., description="事件类型")
+    event_type_display: str = Field(..., description="事件类型显示名称")
+    event_date: str = Field(..., description="事件日期（ISO 8601格式）")
+    event_description: Optional[str] = Field(None, description="事件描述")
+    related_session_id: Optional[str] = Field(None, description="关联的Session ID")
+    metadata: Dict = Field(default_factory=dict, description="附加元数据")
+    days_since_event: int = Field(..., description="距离今天数")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "event_id": "550e8400-e29b-41d4-a716-446655440000",
+                "event_type": "dental_cleaning",
+                "event_type_display": "洁牙",
+                "event_date": "2025-01-15T10:00:00Z",
+                "event_description": "常规洁牙",
+                "days_since_event": 8
+            }
+        }
+
+
+class ConcernPointData(BaseModel):
+    """关注点数据（用于EvidencePack）"""
+    concern_id: str = Field(..., description="关注点ID")
+    source_type: str = Field(..., description="来源类型：user_reported/system_detected")
+    zone_id: Optional[int] = Field(None, description="分区ID（1-7）")
+    zone_display_name: Optional[str] = Field(None, description="分区显示名称")
+    location_description: Optional[str] = Field(None, description="位置描述")
+    concern_type: str = Field(..., description="关注点类型")
+    concern_description: Optional[str] = Field(None, description="详细描述")
+    severity: str = Field(..., description="严重程度：mild/moderate/severe")
+    status: str = Field(..., description="状态：active/resolved/monitoring")
+    first_detected_at: str = Field(..., description="首次检测时间")
+    last_observed_at: str = Field(..., description="最后观察时间")
+    days_since_first: int = Field(..., description="首次发现距今天数")
+    related_sessions_count: int = Field(default=0, description="关联Session数量")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "concern_id": "550e8400-e29b-41d4-a716-446655440001",
+                "source_type": "user_reported",
+                "zone_id": 2,
+                "location_description": "上门牙右侧",
+                "concern_type": "dark_spot",
+                "severity": "mild",
+                "status": "active",
+                "days_since_first": 15
+            }
+        }
+
+
+class UserHistorySummary(BaseModel):
+    """用户历史摘要"""
+    total_events: int = Field(default=0, description="事件总数")
+    recent_events: List[UserEventData] = Field(default_factory=list, description="近期事件（最近6个月）")
+    active_concerns: List[ConcernPointData] = Field(default_factory=list, description="活跃关注点")
+    resolved_concerns_count: int = Field(default=0, description="已解决关注点数量")
+    monitoring_concerns_count: int = Field(default=0, description="监控中关注点数量")
+    
+    # 统计信息
+    days_since_last_check: Optional[int] = Field(None, description="距上次检查天数")
+    days_since_last_event: Optional[int] = Field(None, description="距上次事件天数")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "total_events": 5,
+                "recent_events": [],
+                "active_concerns": [],
+                "resolved_concerns_count": 3,
+                "days_since_last_check": 7
+            }
+        }
+
+
+# ========================================
 # 证据包主模型
 # ========================================
 
@@ -217,6 +300,9 @@ class EvidencePack(BaseModel):
     total_frames: int = Field(..., ge=1, le=25, description="关键帧总数（1-25）")
     frames: List[KeyframeData] = Field(..., max_length=25, description="关键帧数据列表（最多25帧）")
     baseline_reference: Optional[BaselineReference] = Field(None, description="基线参考数据（Quick Check时使用）")
+    
+    # 新增：用户历史信息
+    user_history: Optional[UserHistorySummary] = Field(None, description="用户历史摘要（事件和关注点）")
 
     @field_validator("frames")
     @classmethod
@@ -238,6 +324,10 @@ class EvidencePack(BaseModel):
                 "zone_id": None,
                 "created_at": "2025-01-23T10:30:00Z",
                 "total_frames": 3,
-                "frames": []
+                "frames": [],
+                "user_history": {
+                    "total_events": 2,
+                    "active_concerns": []
+                }
             }
         }

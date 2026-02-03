@@ -63,26 +63,32 @@ class KeyframeExtractor:
             priority_frames = []
             scan_interval = int(fps) if fps > 0 else 30
             
+            print(f"[抽帧] 开始规则扫描: 间隔={scan_interval}帧, 阈值={settings.PRIORITY_FRAME_THRESHOLD}")
+            
             for i in range(0, total_frames, scan_interval):
                 frame = processor.get_frame(i)
                 if frame is not None:
-                    score = self._detect_anomaly_opencv(frame)
+                    # 获取详细分析结果
+                    score, detail_scores, reason = self._detect_anomaly_opencv(frame)
+                    
+                    # 打印详细分析日志
+                    log_msg = self._format_detection_log(i, score, detail_scores, reason)
+                    print(log_msg)
+                    
                     if score > settings.PRIORITY_FRAME_THRESHOLD:
                         # 计算时间戳
                         ts_val = i / fps if fps else 0
-                        # 获取触发原因
-                        trigger_reason = self._get_anomaly_reason(frame, score)
                         priority_frames.append({
                             "frame_index": i,
                             "timestamp_val": ts_val,
                             "timestamp_str": self._format_timestamp(ts_val),
                             "score": score,
                             "strategy": "rule_triggered",
-                            "reason": trigger_reason,
+                            "reason": reason,
                             "image": frame
                         })
             
-            print(f"[抽帧] 规则触发帧数量: {len(priority_frames)}")
+            print(f"[抽帧] 规则触发帧数量: {len(priority_frames)} (阈值>{settings.PRIORITY_FRAME_THRESHOLD})")
 
             # 3. 轨道二：均匀抽帧 (Uniform Track)
             uniform_frames = []
@@ -181,97 +187,104 @@ class KeyframeExtractor:
             if processor:
                 processor.release()
 
-    def _detect_anomaly_opencv(self, frame: np.ndarray) -> float:
+    def _detect_anomaly_opencv(self, frame: np.ndarray) -> tuple:
         """
-        OpenCV 异常检测 - 计算综合异常分数
+        OpenCV 异常检测 - 计算综合异常分数和各维度得分
 
         检测项目：
         1. 深色沉积物（牙结石、色素）
         2. 黄色牙菌斑
         3. 牙龈红肿
         4. 结构异常
+
+        Returns:
+            tuple: (总异常分数, 详细得分字典, 触发原因字符串)
         """
         if frame is None or frame.size == 0:
-            return 0.0
+            return 0.0, {}, "unknown"
 
         h, w = frame.shape[:2]
         total_pixels = h * w
         if total_pixels == 0:
-            return 0.0
+            return 0.0, {}, "unknown"
 
         try:
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             anomaly_score = 0.0
+            
+            # 详细得分记录
+            detail_scores = {
+                "dark_deposit": 0.0,
+                "yellow_plaque": 0.0,
+                "gum_issue": 0.0,
+            }
+            triggered_reasons = []
 
             # 1. 深色沉积物（低亮度区域）
             mask_black = cv2.inRange(hsv, np.array([0, 0, 0]), np.array([180, 255, 60]))
             black_ratio = np.count_nonzero(mask_black) / total_pixels
             if black_ratio > 0.02 and black_ratio < 0.3:  # 排除全黑帧
-                anomaly_score += min(black_ratio * 4.0, 0.35)
+                score = min(black_ratio * 4.0, 0.35)
+                anomaly_score += score
+                detail_scores["dark_deposit"] = round(score, 3)
+                if score > 0.1:  # 显著的深色沉积
+                    triggered_reasons.append("dark_deposit")
 
             # 2. 黄色牙菌斑/牙石
             mask_yellow = cv2.inRange(hsv, np.array([15, 40, 80]), np.array([35, 255, 255]))
             yellow_ratio = np.count_nonzero(mask_yellow) / total_pixels
             if yellow_ratio > 0.015:
-                anomaly_score += min(yellow_ratio * 5.0, 0.35)
+                score = min(yellow_ratio * 5.0, 0.35)
+                anomaly_score += score
+                detail_scores["yellow_plaque"] = round(score, 3)
+                if score > 0.1:  # 显著的黄色牙菌斑
+                    triggered_reasons.append("yellow_plaque")
 
             # 3. 牙龈红肿（高饱和度红色）
             mask_red1 = cv2.inRange(hsv, np.array([0, 120, 50]), np.array([10, 255, 255]))
             mask_red2 = cv2.inRange(hsv, np.array([160, 120, 50]), np.array([180, 255, 255]))
             red_ratio = (np.count_nonzero(mask_red1) + np.count_nonzero(mask_red2)) / total_pixels
             if red_ratio > 0.08:
-                anomaly_score += min(red_ratio * 2.5, 0.3)
+                score = min(red_ratio * 2.5, 0.3)
+                anomaly_score += score
+                detail_scores["gum_issue"] = round(score, 3)
+                if score > 0.1:  # 显著的牙龈问题
+                    triggered_reasons.append("gum_issue")
 
-            return min(anomaly_score, 1.0)
+            total_score = min(anomaly_score, 1.0)
+            
+            # 生成原因字符串
+            if triggered_reasons:
+                reason_str = ",".join(triggered_reasons)
+            elif total_score > 0:
+                reason_str = "anomaly_detected"
+            else:
+                reason_str = "none"
+            
+            return total_score, detail_scores, reason_str
 
         except Exception as e:
             print(f"[CV Error] Frame analysis failed: {e}")
-            return 0.0
+            return 0.0, {}, "detection_error"
 
-    def _get_anomaly_reason(self, frame: np.ndarray, score: float) -> str:
+    def _format_detection_log(self, frame_index: int, total_score: float, 
+                              detail_scores: dict, reason: str) -> str:
         """
-        获取异常触发的具体原因
-
-        Args:
-            frame: 图像帧
-            score: 异常分数
-
+        格式化检测日志输出
+        
         Returns:
-            触发原因字符串
+            格式化的日志字符串
         """
-        if frame is None or frame.size == 0:
-            return "unknown"
-
-        reasons = []
-
-        try:
-            h, w = frame.shape[:2]
-            total_pixels = h * w
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-            # 检测深色沉积
-            mask_black = cv2.inRange(hsv, np.array([0, 0, 0]), np.array([180, 255, 60]))
-            black_ratio = np.count_nonzero(mask_black) / total_pixels
-            if black_ratio > 0.02 and black_ratio < 0.3:
-                reasons.append("dark_deposit")
-
-            # 检测黄色牙菌斑
-            mask_yellow = cv2.inRange(hsv, np.array([15, 40, 80]), np.array([35, 255, 255]))
-            yellow_ratio = np.count_nonzero(mask_yellow) / total_pixels
-            if yellow_ratio > 0.015:
-                reasons.append("yellow_plaque")
-
-            # 检测牙龈红肿
-            mask_red1 = cv2.inRange(hsv, np.array([0, 120, 50]), np.array([10, 255, 255]))
-            mask_red2 = cv2.inRange(hsv, np.array([160, 120, 50]), np.array([180, 255, 255]))
-            red_ratio = (np.count_nonzero(mask_red1) + np.count_nonzero(mask_red2)) / total_pixels
-            if red_ratio > 0.08:
-                reasons.append("gum_issue")
-
-            if reasons:
-                return ",".join(reasons)
-            else:
-                return "anomaly_detected"
-
-        except Exception:
-            return "detection_error"
+        # 构建详细得分字符串
+        details = []
+        if detail_scores.get("dark_deposit", 0) > 0:
+            details.append(f"dark={detail_scores['dark_deposit']:.2f}")
+        if detail_scores.get("yellow_plaque", 0) > 0:
+            details.append(f"yellow={detail_scores['yellow_plaque']:.2f}")
+        if detail_scores.get("gum_issue", 0) > 0:
+            details.append(f"gum={detail_scores['gum_issue']:.2f}")
+        
+        detail_str = ", ".join(details) if details else "none"
+        
+        return (f"[抽帧] 规则抽帧 Frame {frame_index} 分析完成: "
+                f"total={total_score:.2f}, {detail_str}; 原因={reason}")

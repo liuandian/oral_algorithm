@@ -33,6 +33,7 @@ ENV/
 *.swo
 *~
 .DS_Store
+.claude/
 
 # Environment Variables
 .env
@@ -50,6 +51,9 @@ data/c_stream/*
 !data/a_stream/.gitkeep
 !data/b_stream/.gitkeep
 !data/c_stream/.gitkeep
+
+tests/video/*
+tests/picture/*
 
 # Logs
 *.log
@@ -72,3 +76,4 @@ htmlcov/
 .DS_Store
 .AppleDouble
 .LSOverride
+
